@@ -1,0 +1,311 @@
+// ClaimChain — Prisma Schema
+// Database: PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  cases    Case[]
+  accounts Account[]
+  sessions Session[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ── Core Domain ───────────────────────────────────────────────────────────────
+
+model Case {
+  id          String     @id @default(cuid())
+  userId      String
+  title       String                         // "AC stopped working — LG service"
+  description String?
+  category    CaseCategory @default(PRODUCT) // product | service | insurance | telecom | banking | other
+  status      CaseStatus   @default(ACTIVE)
+  productName String?
+  modelNumber String?
+  serialNumber String?
+  purchaseDate DateTime?
+  warrantyExpiry DateTime?
+  sellerName  String?
+  totalAmountPaid Float?                     // sum of all payments
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents     Document[]
+  events        Event[]
+  promises      Promise[]
+  payments      Payment[]
+  contradictions Contradiction[]
+  gaps          Gap[]
+  parties       Party[]
+
+  @@index([userId])
+}
+
+enum CaseCategory {
+  PRODUCT
+  SERVICE
+  INSURANCE
+  TELECOM
+  BANKING
+  ECOMMERCE
+  BUILDER
+  OTHER
+}
+
+enum CaseStatus {
+  ACTIVE
+  RESOLVED
+  ESCALATED
+  CLOSED
+}
+
+// ── Document — any uploaded file ──────────────────────────────────────────────
+
+model Document {
+  id           String       @id @default(cuid())
+  caseId       String
+  fileName     String                        // original filename
+  storedName   String                        // uuid filename on disk
+  mimeType     String
+  sizeBytes    Int
+  docType      DocumentType @default(OTHER)
+  rawText      String?      @db.Text        // extracted plain text
+  uploadedAt   DateTime     @default(now())
+
+  case         Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  events       Event[]                       // events sourced from this doc
+  promises     Promise[]
+  payments     Payment[]
+  contradictions Contradiction[]
+
+  @@index([caseId])
+}
+
+enum DocumentType {
+  INVOICE
+  WARRANTY
+  SERVICE_REPORT
+  WHATSAPP_EXPORT
+  EMAIL
+  PHOTO
+  VIDEO
+  BANK_SMS
+  BANK_STATEMENT
+  LEGAL_NOTICE
+  COMPLAINT
+  SCREENSHOT
+  HANDWRITTEN
+  OTHER
+}
+
+// ── Event — one point on the timeline ────────────────────────────────────────
+
+model Event {
+  id          String    @id @default(cuid())
+  caseId      String
+  documentId  String?                        // source document (nullable = manual)
+  title       String
+  description String?
+  eventDate   DateTime
+  dateConfidence DateConfidence @default(EXTRACTED) // extracted | user_set | approximate
+  eventType   EventType  @default(OTHER)
+  isManual    Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+
+  case        Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  document    Document?  @relation(fields: [documentId], references: [id])
+
+  @@index([caseId])
+  @@index([eventDate])
+}
+
+enum EventType {
+  PURCHASE
+  FAULT_REPORTED
+  SERVICE_VISIT
+  PAYMENT
+  PROMISE_MADE
+  PROMISE_BROKEN
+  COMPANY_RESPONSE
+  ESCALATION
+  REFUND
+  REPLACEMENT
+  COMPLAINT_FILED
+  LEGAL_NOTICE
+  OTHER
+}
+
+enum DateConfidence {
+  EXTRACTED    // AI/parser pulled the date from document content
+  USER_SET     // User manually set or confirmed
+  APPROXIMATE  // Estimated from context ("last month", EXIF missing, etc.)
+}
+
+// ── Promise — things someone committed to doing ───────────────────────────────
+
+model Promise {
+  id          String          @id @default(cuid())
+  caseId      String
+  documentId  String?
+  text        String                          // "Technician will return tomorrow"
+  madeBy      String?                         // party name
+  madeOn      DateTime?
+  dueDate     DateTime?
+  fulfilled   PromiseFulfilled @default(UNKNOWN)
+  createdAt   DateTime        @default(now())
+
+  case        Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  document    Document?       @relation(fields: [documentId], references: [id])
+
+  @@index([caseId])
+}
+
+enum PromiseFulfilled {
+  YES
+  NO
+  UNKNOWN
+}
+
+// ── Payment — money exchanged ─────────────────────────────────────────────────
+
+model Payment {
+  id          String    @id @default(cuid())
+  caseId      String
+  documentId  String?
+  amount      Float
+  currency    String    @default("INR")
+  paidOn      DateTime?
+  paidBy      String?
+  paidTo      String?
+  purpose     String?                         // "Service charge", "Spare part"
+  hasReceipt  Boolean   @default(false)       // false = gap detected
+  createdAt   DateTime  @default(now())
+
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  document    Document? @relation(fields: [documentId], references: [id])
+
+  @@index([caseId])
+}
+
+// ── Contradiction — two sources disagree ─────────────────────────────────────
+
+model Contradiction {
+  id          String    @id @default(cuid())
+  caseId      String
+  documentAId String?
+  documentBId String?
+  claimA      String    @db.Text             // "Part replaced" (from WhatsApp)
+  claimB      String    @db.Text             // "Inspection only" (from service report)
+  sourceA     String?                        // human-readable source label
+  sourceB     String?
+  severity    Severity  @default(MEDIUM)
+  resolved    Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  docA        Document? @relation(fields: [documentAId], references: [id])
+
+  @@index([caseId])
+}
+
+// ── Gap — missing evidence detector ──────────────────────────────────────────
+
+model Gap {
+  id          String    @id @default(cuid())
+  caseId      String
+  description String                          // "No receipt for ₹1,250 payment on 05 Aug"
+  suggestion  String?                         // "Request duplicate receipt from service center"
+  severity    Severity  @default(MEDIUM)
+  resolved    Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+// ── Party — people/companies involved ────────────────────────────────────────
+
+model Party {
+  id      String    @id @default(cuid())
+  caseId  String
+  name    String
+  role    PartyRole @default(OTHER)
+  contact String?
+  email   String?
+
+  case    Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@index([caseId])
+}
+
+enum PartyRole {
+  BUYER
+  SELLER
+  MANUFACTURER
+  SERVICE_CENTER
+  TECHNICIAN
+  INSURER
+  REGULATOR
+  LAWYER
+  OTHER
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
